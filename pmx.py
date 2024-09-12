@@ -32,6 +32,7 @@ def cache_resources():
         if resource_type in ['qemu', 'lxc']:
             resource_cache[resource_id] = {
                 'type': resource_type,
+                'name': resource['name'],
                 'node': node,
                 'status': status,
                 'uptime': resource.get('uptime', 0)  # Default to 0 if not available
@@ -109,8 +110,9 @@ def main():
                 for resource_id in ids:
                     if resource_id in resource_cache:
                         status_info = resource_cache[resource_id]
+                        name = status_info['name']
                         uptime = status_info['uptime']
-                        status_output = f"{status_info['type']}/{resource_id} {status_info['status']}"
+                        status_output = f"{status_info['type']}/{resource_id}: {name} {status_info['status']}"
                         if status_info['status'] == 'running':
                             status_output += f" {format_uptime(uptime)}"
                         print(status_output)
