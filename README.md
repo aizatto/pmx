@@ -35,33 +35,12 @@ The script takes a command (`start`, `stop`, `shutdown`, or `status`) followed b
 By default, commands are executed asynchronously. To run them synchronously, pass the `--sync` argument:
 
 ```bash
-./pmx.py start 101 --sync
+./pmx.py --sync start 101 
 ```
 
-#### **Start** a VM or container
+#### **Get the status** of all your containers
 ```bash
-./pmx.py start 101 102 103
-```
-
-```
-Starting VM 101...
-Starting VM 102...
-Starting VM 103...
-```
-
-#### **Stop** a VM or container
-```bash
-./pmx.py stop 101 102
-```
-
-```
-Stopping VM 101...
-VM 102 is already stopped.
-```
-
-#### **Shutdown** a VM or container
-```bash
-./pmx.py shutdown 101
+./pmy.py
 ```
 
 #### **Get the status** of one or more VMs/containers
@@ -73,6 +52,62 @@ VM 102 is already stopped.
 lxc/101 running 1h 23m
 qemu/102 stopped
 ```
+
+#### **Start** a VM or container
+```bash
+./pmx.py start 101 102 103
+```
+
+```
+Starting VM 101...
+Starting VM 102...
+VM 103 is already running. Only 'stop' or 'shutdown' are allowed.
+```
+
+#### **Stop** a VM or container
+```bash
+./pmx.py stop 101 102
+```
+
+```
+Stopping VM 101...
+VM 102 is already stopped. Only 'start' is allowed.
+```
+
+#### **Shutdown** a VM or container
+```bash
+./pmx.py shutdown 101
+```
+
+#### **Destroy** a VM or container
+```bash
+./pmx.py destroy 101
+```
+
+You will be asked to confirm if you want to destroy vm. You can skip confirmation by passing `--skip-confirm`.
+
+By default, jobs will be purged, and unreferenced disks destroyed. You can use the arguments:
+
+1. `--do-not-purge-jobs` to not purge from job configurations
+1. `--do-not-destroy-unreferenced-disks` to not destroy unreferenced disks
+
+#### Targetting a Node
+You can pass a `--node` argument if you want the selector to select pods based on a node.
+
+For example, assuming the environment looks like:
+
+1. node1
+   1. lxc/100
+   1. lxc/101
+2. node2
+   1. lxc/103
+
+You can return the status of all vms on the Node via
+```bash
+./pmx.py --node status node1
+```
+
+This works with `start`, `shutdown`, `stop`, and `destroy`.
 
 ### Notes:
 - If a VM/container is `stopped`, only the `start` command will be allowed.
