@@ -60,6 +60,7 @@ def get_cluster_resources(args):
         cluster_resources = run_pvesh_command('get', '/cluster/resources')
         for resource in cluster_resources:
             if resource['type'] in ['lxc', 'qemu'] and str(resource['vmid']) in vmids:
+                vmid = str(resource['vmid'])
                 vmids[vmid] = True
                 resources.append(resource)
 
@@ -138,8 +139,8 @@ def perform_action(args, resource):
 
     api_path = f"/nodes/{resource['node']}/{resource['type']}/{vmid}/status/{action}"
     try:
-        run_pvesh_command('create', api_path)
         print(f"{action.capitalize()} command sent for {resource['type']}/{vmid}.")
+        run_pvesh_command('create', api_path)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh command: {e.stderr}", file=sys.stderr)
 
@@ -160,8 +161,8 @@ def destroy_resource(args, resource):
             options.append("--purge")
         if destroy_unreferenced_disks:
             options.append("--destroy-unreferenced-disks")
+        print(f"Destroying {resource['type']}/{vmid}.")
         run_pvesh_command('delete', api_path, options)
-        print(f"Resource {resource['type']}/{vmid} destroyed.")
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -198,7 +199,7 @@ async def main():
         async def fn(resource):
             perform_action(args, resource)
         
-        await run_on_resources(args, fn)
+        await run_on_resources(args, resources, fn)
     elif args.command == 'destroy':
         if not args.skip_confirm:
             print("Are you sure you want to destroy the following resources?")
