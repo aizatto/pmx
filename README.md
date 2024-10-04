@@ -48,6 +48,7 @@ Available commands:
 1. `snapshot`
 1. `delsnapshot`
 1. `listsnapshot`
+1. `replications`
 1. `replication-schedule-now`
 1. `vzdump`
 
@@ -134,6 +135,14 @@ Arguments:
 Arguments:
 
 1. `--name` Required. snapshot name
+
+### **List Replications**
+
+```bash
+./pmx.py replications
+./pmx.py replications 101 102
+./pmx.py --node replications node1
+```
 
 ### **Replicate** a VM or container
 
