@@ -5,8 +5,6 @@ import asyncio
 import json
 import subprocess
 import sys
-import time
-import threading
 
 def run_pvesh_command(pvesh_command, api_path, options = []):
     """Run pvesh command and return JSON output."""
@@ -74,13 +72,71 @@ def get_cluster_resources(args):
             for idx, vmid in enumerate(missing):
                 print(f'{idx + 1}. {vmid}')
 
-    elif args.command == "status":
+    # These commands are non destructive
+    elif args.command == "status" or \
+        args.command == 'listsnapshot':
         cluster_resources = run_pvesh_command('get', '/cluster/resources')
         for resource in cluster_resources:
             if resource['type'] in ['lxc', 'qemu']:
                 resources.append(resource)
 
     return resources
+
+def get_cluster_replications(args):
+    replications = []
+
+    if args.node:
+        if not args.ids:
+            print("Missing Node ids ")
+            return replications
+
+        nodes = {}
+        for node in args.ids:
+           nodes[node] = False 
+
+        json_replications = run_pvesh_command('get', '/cluster/replication')
+        for replication in json_replications:
+            if replication['source'] in nodes:
+                if 'disable' in replication and replication['disable'] == 1:
+                    continue
+
+                nodes[replication['node']] = True
+                replications.append(replication)
+        
+        missing = []
+        for node, exists in nodes.items():
+            if not exists: 
+                missing.append(node)
+        
+        if missing:
+            print("Nodes do not exist:")
+            for idx, node in enumerate(missing):
+                print(f'{idx + 1}. {node}')
+    elif args.ids:
+        vmids = {}
+        for vmid in args.ids:
+           vmids[vmid] = False 
+
+        json_replications = run_pvesh_command('get', '/cluster/replication')
+        for replication in json_replications:
+            vmid = str(replication['guest'])
+            if vmid in vmids:
+                if 'disable' in replication and replication['disable'] == 1:
+                    continue
+
+                vmids[vmid] = True
+                replications.append(replication)
+
+        missing = []
+        for vmid, exists in vmids.items():
+            if not exists: 
+                missing.append(vmid)
+        
+        if missing:
+            print("VMs do not exist:")
+            for idx, vmid in enumerate(missing):
+                print(f'{idx + 1}. {vmid}')
+    return replications
 
 def humanize_seconds(seconds):
     """Convert seconds to a human-readable format."""
@@ -124,7 +180,7 @@ def validate_actions(vmid, action, status):
         return False
     return True
 
-def perform_action(args, resource):
+async def perform_action(args, resource):
     """Perform the specified action on a single resource."""
     action = args.command
 
@@ -144,7 +200,7 @@ def perform_action(args, resource):
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh command: {e.stderr}", file=sys.stderr)
 
-def destroy_resource(args, resource):
+async def destroy_resource(args, resource):
     """Destroy the specified resources."""
     purge = not args.do_not_purge_jobs
     destroy_unreferenced_disks = not args.do_not_destroy_unreferenced_disks
@@ -166,27 +222,100 @@ def destroy_resource(args, resource):
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
+async def snapshot_resources(args, resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    try:
+        api_path = f"/nodes/{resource['node']}/{resource['type']}/{vmid}/snapshot"
+        options= ["--snapname", args.name]
+        if args.description:
+            options.append("--description")
+            options.append(args.description)
+        print(f"Snapshotting {resource['type']}/{vmid}.")
+        run_pvesh_command('create', api_path, options)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
+async def delsnapshot_resources(args, resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    try:
+        api_path = f"/nodes/{resource['node']}/{resource['type']}/{vmid}/snapshot/{args.name}"
+        options = []
+        if args.force:
+            options.append("--force")
+            options.append("true")
+        print(f"Delete Snapshot {resource['type']}/{vmid}.")
+        run_pvesh_command('delete', api_path, options)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
+async def listsnapshot_resources(args, resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    try:
+        api_path = f"/nodes/{resource['node']}/{resource['type']}/{vmid}/snapshot"
+        # print(f"List Snapshot {resource['type']}/{vmid}.")
+        snapshots = run_pvesh_command('ls', api_path)
+        for snapshot in snapshots:
+            print(f"{resource['id']}: {snapshot['name']}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
+async def vzdump_resources(args, resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    try:
+        api_path = f"/nodes/{resource['node']}/vzdump"
+        options = ["--vmid", vmid, "--compress", "zstd"]
+        print(f"Vzdump {resource['type']}/{vmid}.")
+        run_pvesh_command('create', api_path, options)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
 async def run_on_resources(args, resources, fn):
     if args.sync:
         for resource in resources:
-            await fn(resource)
+            await fn(args, resource)
     else:
         tasks = []
         for resource in resources:
-            tasks.append(fn(resource))
+            tasks.append(fn(args, resource))
         await asyncio.gather(*tasks)
 
-async def main():
-    parser = argparse.ArgumentParser(description='Manage Proxmox VMs and containers.')
-    parser.add_argument('--node', action='store_true', help='Treat ids as node names')
-    parser.add_argument('--sync', action='store_true', help='Run commands synchronously.')
-    parser.add_argument('--skip-confirm', action='store_true', help='On destroy, skip confirm.', default=False)
-    parser.add_argument('--do-not-purge-jobs', action='store_true', help='On destroy, skip purging from job configurations.', default=False)
-    parser.add_argument('--do-not-destroy-unreferenced-disks', action='store_true', help='On destroy, skip destroy unreferenced disks.', default=False)
-    parser.add_argument('command', nargs='?', choices=['start', 'stop', 'shutdown', 'status', 'destroy'], default="status", help='Action to perform.')
-    parser.add_argument('ids', nargs='*', help='VM/Container IDs.')
-    args = parser.parse_args()
+async def replication_schedule_now(args, replication):
+    try:
+        api_path = f"/nodes/{replication['source']}/replication/{replication['id']}/schedule_now"
+        print(f"Replication {replication['guest']} {replication['source']} -> {replication['target']}")
+        run_pvesh_command('create', api_path)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
+async def main_replications(args):
+    replications = get_cluster_replications(args)
+
+    if not replications:
+        print("No replications found")
+        return
+
+    if args.command == 'replication-schedule-now':
+        await run_on_resources(args, replications, replication_schedule_now)
+    else:
+        print(f"Command missing implementation: {args.command}")
+
+async def main_vms(args):
     resources = get_cluster_resources(args)
 
     if not resources:
@@ -195,11 +324,8 @@ async def main():
     
     if args.command == 'status':
         print_resource_status(args, resources)
-    elif args.command in ['start', 'stop', 'shutdown']:
-        async def fn(resource):
-            perform_action(args, resource)
-        
-        await run_on_resources(args, resources, fn)
+    elif args.command in ['start', 'stop', 'shutdown', 'reboot', 'resume', 'suspend']:
+        await run_on_resources(args, resources, perform_action)
     elif args.command == 'destroy':
         if not args.skip_confirm:
             print("Are you sure you want to destroy the following resources?")
@@ -212,12 +338,64 @@ async def main():
                 print("Cancelled destroying resources")
                 return
 
-        async def fn(resource):
-            destroy_resource(args, resource)
+        await run_on_resources(args, resources, destroy_resource)
+    elif args.command == 'snapshot':
+        if not args.name:
+            print("--name argument is required")
+            return
 
-        await run_on_resources(args, resources, fn)
+        await run_on_resources(args, resources, snapshot_resources)
+    elif args.command == 'delsnapshot':
+        if not args.name:
+            print("--name argument is required")
+            return
+
+        await run_on_resources(args, resources, delsnapshot_resources)
+    elif args.command == 'listsnapshot':
+        await run_on_resources(args, resources, listsnapshot_resources)
+    elif args.command == 'vzdump':
+        await run_on_resources(args, resources, vzdump_resources)
     else:
-        print("Supported commands are 'start', 'stop', 'shutdown', 'status', 'destroy'.")
+        print(f"Command missing implementation: {args.command}")
+
+async def main():
+    parser = argparse.ArgumentParser(description='Manage Proxmox VMs and containers.')
+    parser.add_argument('--node', action='store_true', help='Treat ids as node names')
+    parser.add_argument('--sync', action='store_true', help='Run commands synchronously.')
+    parser.add_argument('--skip-confirm', action='store_true', help='On destroy, skip confirm.', default=False)
+    parser.add_argument('--do-not-purge-jobs', action='store_true', help='On destroy, skip purging from job configurations.', default=False)
+    parser.add_argument('--do-not-destroy-unreferenced-disks', action='store_true', help='On destroy, skip destroy unreferenced disks.', default=False)
+    parser.add_argument('--name', action='store', help='On snapshot, saves a name. Required for snapshot.', default=False)
+    parser.add_argument('--description', action='store', help='On snapshot, saves a description.', default=False)
+    parser.add_argument('--force', action='store_true', help='On delsnapshot, For removal from config file, even if removing disk snapshots fails.', default=False)
+    parser.add_argument(
+        'command',
+        nargs='?',
+        choices=[
+            'status',
+            'start',
+            'stop',
+            'shutdown',
+            'reboot',
+            'resume',
+            'suspend',
+            'destroy',
+            'snapshot',
+            'delsnapshot',
+            'listsnapshot',
+            'vzdump',
+            'replication-schedule-now',
+        ],
+        default="status",
+        help='Action to perform.'
+    )
+    parser.add_argument('ids', nargs='*', help='VM/Container IDs.')
+    args = parser.parse_args()
+
+    if args.command == "replication-schedule-now":
+        await main_replications(args)
+    else:
+        await main_vms(args)
     
 if __name__ == "__main__":
     try:
