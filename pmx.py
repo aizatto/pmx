@@ -498,6 +498,8 @@ async def ha_set_command(args, resource, ha_resource):
             run_pvesh_command('set', api_path, options)
         else:
             sid = f'ct:{vmid}'
+            if resource['type'] == 'qemu':
+                sid = f'vm:{vmid}'
             options = ["--sid", sid, "--comment",
                        resource['name'], "--state", args.ha_state]
             print(
