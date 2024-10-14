@@ -51,6 +51,9 @@ Available commands:
 1. `replications`
 1. `replication-schedule-now`
 1. `vzdump`
+1. `ha`
+1. `ha-delete`
+1. `ha-upsert`
 
 ### **Get the status** of all your containers
 ```bash
@@ -148,6 +151,35 @@ Arguments:
 
 ```bash
 ./pmx.py replication-schedule-now 101
+```
+
+### Get HA (High Availability) status
+
+```bash
+./pmx.py ha
+./pmx.py ha 100 101
+./pmx.py --node ha node1
+```
+
+### Set HA state
+
+State can be one of:
+1. `started`: The CRM tries to start the resource. Service state is set to `started` after successful start. On node failures, or when start fails, it tries to recover the resource.  If everything fails, service state it set to `error`.
+2. `stopped`: The CRM tries to keep the resource in `stopped` state, but it still tries to relocate the resources on node failures.
+3. `enabled`: Alias for `started`
+4. `disabled`: The CRM tries to put the resource in `stopped` state, but does not try to relocate the resources on node failures. The main purpose of this state is error recovery, because it is the only way to move a resource out of the `error` state.
+5. `ignored`: The resource gets removed from the manager status and so the CRM and the LRM do not touch the resource anymore. All {pve} API calls affecting this resource will be executed, directly bypassing the HA stack. CRM commands will be thrown away while there source is in this state. The resource will not get relocated on node failures.
+
+
+```bash
+./pmx.py --ha-state started ha-set 100 101
+./pmx.py --ha-state ignored ha-set node1
+```
+
+### Remove HA
+
+```bash
+./pmx.py ha-delete 100
 ```
 
 ### Global Arguments

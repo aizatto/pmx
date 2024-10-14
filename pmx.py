@@ -20,17 +20,37 @@ def run_pvesh_command(pvesh_command, api_path, options=[]):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
+        if result == "" or result == None:
+            # happens on ha changes
+            return {}
         if pvesh_command != "delete":
             return json.loads(result.stdout)
-        return ""
+        return {}
     except subprocess.CalledProcessError as e:
         print(
             f"Error executing pvesh command on {api_path}: {e.stderr}", file=sys.stderr)
 
 
-def get_cluster_resources(args):
-    """Fetch resources from Proxmox."""
+def get_filtered_cluster_resources(args):
+    """
+    Fetch resources from Proxmox.
+
+    Args:
+    args: command line arguments
+
+    Returns:
+    list of dict: Result of pvesh get /cluster/resources
+        - 'vmid' (int): VMID
+        - 'id' (string): VMID namespaced with type, ie: lxc/100, qemu/101
+        - 'node' (string): Node
+        - 'type' (string): 'lxc' or 'qemu'
+        - 'status' (string): Current status
+
+    Example:
+    >>> get_filtered_cluster_resources({'command': 'status'})
+    """
     resources = []
+    vmids = {}
 
     if args.node:
         if not args.ids:
@@ -45,6 +65,9 @@ def get_cluster_resources(args):
         for resource in cluster_resources:
             if 'node' in resource and resource['node'] in nodes and resource['type'] in ['lxc', 'qemu']:
                 nodes[resource['node']] = True
+
+                vmid = resource['vmid']
+                vmids[vmid] = True
                 resources.append(resource)
 
         missing = []
@@ -57,7 +80,6 @@ def get_cluster_resources(args):
             for idx, node in enumerate(missing):
                 print(f'{idx + 1}. {node}')
     elif args.ids:
-        vmids = {}
         for vmid in args.ids:
             vmids[vmid] = False
 
@@ -78,18 +100,22 @@ def get_cluster_resources(args):
             for idx, vmid in enumerate(missing):
                 print(f'{idx + 1}. {vmid}')
 
-    # These commands are non destructive
+    # These commands are non destructive so we can select all vms.
+    # Do not allow destructive commands to select anything.
     elif args.command == "status" or \
+            args.command == 'ha' or \
             args.command == 'listsnapshot':
         cluster_resources = run_pvesh_command('get', '/cluster/resources')
         for resource in cluster_resources:
             if resource['type'] in ['lxc', 'qemu']:
+                vmid = str(resource['vmid'])
+                vmids[vmid] = True
                 resources.append(resource)
 
-    return resources
+    return resources, vmids
 
 
-def get_nodes_replication(nodes):
+def get_filtered_nodes_replication(nodes):
     guesttoreplicas = {}
 
     for node in nodes:
@@ -114,10 +140,28 @@ def get_nodes_replication(nodes):
 
     return replications
 
-# To only be used for status information
 
+def get_filtered_high_fidelity_cluster_replications(args):
+    """
+    Used only for retrieving replication information.
 
-def get_high_fidelity_cluster_replications(args):
+    Args:
+    args: command line arguments
+
+    Returns
+    list of dict: Result of pvesh get /cluster/replication
+        - 'guest' (int): VMID
+        - 'id' (string): Replication Job ID
+        - 'schedule' (string): Storage replication schedule. The format is a subset of `systemd` calendar events.
+        - 'schedule' (string): Storage replication schedule. The format is a subset of `systemd` calendar events.
+        - 'source' (string): Node currently on
+        - 'target' (string): Node to be replicated to
+        - 'type' (string)
+
+    Example:
+    >>> get_filtered_high_fidelity_cluster_replications({'command': 'replications'})
+    [{'guest': 100, 'id': '100-0', 'jobnum': 0, 'schedule': '21:00', 'source': 'node1', 'target': 'node2', 'type': 'local'}]
+    """
     replications = []
 
     if args.node:
@@ -148,18 +192,18 @@ def get_high_fidelity_cluster_replications(args):
             for idx, node in enumerate(missing):
                 print(f'{idx + 1}. {node}')
 
-        return get_nodes_replication(exists)
+        return get_filtered_nodes_replication(exists)
     elif args.command == 'replications' and not args.ids:
         pvesh_nodes = run_pvesh_command('get', '/nodes')
         pvesh_nodes = [node["node"] for node in pvesh_nodes]
-        return get_nodes_replication(pvesh_nodes)
+        return get_filtered_nodes_replication(pvesh_nodes)
     elif args.ids:
         vmids = {}
         for vmid in args.ids:
             vmids[vmid] = False
 
         nodesset = {}
-        lfreplicas = get_low_fidelity_cluster_replications(args)
+        lfreplicas = get_filtered_low_fidelity_cluster_replications(args)
         for replica in lfreplicas:
             vmid = str(replica['guest'])
             if vmid in vmids:
@@ -177,15 +221,15 @@ def get_high_fidelity_cluster_replications(args):
                 print(f'{idx + 1}. {vmid}')
 
         hfreplicas = []
-        if not missing:
-            hfreplicas = get_nodes_replication(nodesset.keys())
+        if vmids:
+            hfreplicas = get_filtered_nodes_replication(nodesset.keys())
             hfreplicas = [replica for replica in hfreplicas if str(
                 replica['guest']) in vmids]
 
         return hfreplicas
 
 
-def get_low_fidelity_cluster_replications(args):
+def get_filtered_low_fidelity_cluster_replications(args):
     replications = []
 
     if args.node:
@@ -235,6 +279,26 @@ def get_low_fidelity_cluster_replications(args):
                 print(f'{idx + 1}. {vmid}')
 
     return replications
+
+
+def get_filtered_cluster_ha_resources(vmids):
+    ha_resources = {}
+    output = run_pvesh_command('get', '/cluster/ha/resources')
+    for resource in output:
+        if not resource["type"] == "ct":
+            continue
+
+        sid = resource.get("sid")
+        if sid is None:
+            continue
+
+        vmid = sid[3:]
+        if vmid not in vmids:
+            continue
+
+        ha_resources[vmid] = resource
+
+    return ha_resources
 
 
 def humanize_seconds(seconds):
@@ -393,22 +457,128 @@ async def vzdump_command(args, resource):
 
     try:
         api_path = f"/nodes/{resource['node']}/vzdump"
-        options = ["--vmid", vmid, "--compress", "zstd"]
-        print(f"Vzdump {resource['type']}/{vmid}.")
+        options = ["--vmid", str(vmid), "--compress", "zstd"]
+        print(f"Vzdump {resource['id']}")
         run_pvesh_command('create', api_path, options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
 
-async def run_on_resources(args, resources, fn):
+async def ha_command(args, resource, ha_resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    if ha_resource:
+        print(f"{resource['id']}: {ha_resource['state']}")
+    else:
+        print(f"{resource['id']}: does not exist")
+
+
+async def ha_set_command(args, resource, ha_resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    try:
+        if ha_resource:
+            if args.ha_state == ha_resource.get("state"):
+                print(
+                    f"{resource['type']}/{vmid} state is already {ha_resource['state']}")
+                return
+
+            sid = ha_resource["sid"]
+
+            api_path = f"/cluster/ha/resources/{vmid}"
+            options = ["--state", args.ha_state]
+            print(
+                f"Creating ha {resource['type']}/{vmid} state: {args.ha_state}")
+            run_pvesh_command('set', api_path, options)
+        else:
+            sid = f'ct:{vmid}'
+            options = ["--sid", sid, "--comment",
+                       resource['name'], "--state", args.ha_state]
+            print(
+                f"Creating ha {resource['type']}/{vmid} state: {args.ha_state}")
+            run_pvesh_command('create', "/cluster/ha/resources", options)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
+
+async def ha_remove_command(args, resource, ha_resource):
+    vmid = resource['vmid']
+    if not resource:
+        print(f"Resource ID {vmid} not found.")
+        return
+
+    try:
+        if not ha_resource:
+            print(f"HA resources does not exist {resource['id']}")
+            return
+
+        sid = ha_resource["sid"]
+        api_path = f"/cluster/ha/resources/{sid}"
+        print(f"Remove HA {resource['type']}/{vmid}")
+        run_pvesh_command('delete', api_path)
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
+
+async def run_on_cluster_resources(args, resources, fn):
     if args.sync:
         for resource in resources:
             await fn(args, resource)
-    else:
-        tasks = []
+        return
+
+    tasks = []
+    if args.node:
         for resource in resources:
             tasks.append(fn(args, resource))
-        await asyncio.gather(*tasks)
+    elif args.ids:
+        for id in args.ids:
+            foundresource = None
+            for resource in resources:
+                vmid = resource.get('vmid')
+                if vmid and str(vmid) == id:
+                    foundresource = resource
+                    break
+
+            if not foundresource:
+                continue
+
+            tasks.append(fn(args, resource))
+    else:
+        for resource in resources:
+            tasks.append(fn(args, resource))
+    await asyncio.gather(*tasks)
+
+
+async def run_on_ha_resources(args, ha_resources, fn):
+    if args.sync:
+        for resource in ha_resources:
+            await fn(args, resource)
+        return
+
+    tasks = []
+    if args.node:
+        for resource in ha_resources:
+            tasks.append(fn(args, resource))
+    else:
+        for id in args.ids:
+            resources = []
+            for resource in ha_resources:
+                vmid = resource.get('guest')
+                if vmid and str(vmid) == id:
+                    resources.append(resource)
+
+            if not resources:
+                continue
+
+            for resource in resources:
+                tasks.append(fn(args, resource))
+    await asyncio.gather(*tasks)
 
 
 def replications_command(args, replications):
@@ -440,7 +610,7 @@ def replications_command(args, replications):
 
 
 async def replication_schedule_now(args, replication):
-    if replication['disable']:
+    if replication.get('disable') == 1:
         return
 
     try:
@@ -454,16 +624,17 @@ async def replication_schedule_now(args, replication):
 
 async def main_replications(args):
     if args.command == 'replications':
-        replications = get_high_fidelity_cluster_replications(args)
+        replications = get_filtered_high_fidelity_cluster_replications(args)
         replications_command(args, replications)
     elif args.command == 'replication-schedule-now':
-        await run_on_resources(args, replications, replication_schedule_now)
+        replications = get_filtered_high_fidelity_cluster_replications(args)
+        await run_on_ha_resources(args, replications, replication_schedule_now)
     else:
         print(f"Command missing implementation: {args.command}")
 
 
 async def main_vms(args):
-    resources = get_cluster_resources(args)
+    (resources, vmids) = get_filtered_cluster_resources(args)
 
     if not resources:
         print("No resources found")
@@ -472,8 +643,12 @@ async def main_vms(args):
     if args.command == 'status':
         print_resource_status(args, resources)
     elif args.command in ['start', 'stop', 'shutdown', 'reboot', 'resume', 'suspend']:
-        await run_on_resources(args, resources, perform_command)
+        await run_on_cluster_resources(args, resources, perform_command)
     elif args.command == 'destroy':
+        if not args.ids:
+            print(f"An ID is required when destroying a vm")
+            return
+
         if not args.skip_confirm:
             print("Are you sure you want to destroy the following resources?")
             for idx, resource in enumerate(resources):
@@ -485,23 +660,51 @@ async def main_vms(args):
                 print("Cancelled destroying resources")
                 return
 
-        await run_on_resources(args, resources, destroy_command)
+        await run_on_cluster_resources(args, resources, destroy_command)
     elif args.command == 'snapshot':
         if not args.name:
             print("--name argument is required")
             return
 
-        await run_on_resources(args, resources, snapshot_command)
+        await run_on_cluster_resources(args, resources, snapshot_command)
     elif args.command == 'delsnapshot':
         if not args.name:
             print("--name argument is required")
             return
 
-        await run_on_resources(args, resources, delsnapshot_command)
+        await run_on_cluster_resources(args, resources, delsnapshot_command)
     elif args.command == 'listsnapshot':
-        await run_on_resources(args, resources, listsnapshot_command)
+        await run_on_cluster_resources(args, resources, listsnapshot_command)
     elif args.command == 'vzdump':
-        await run_on_resources(args, resources, vzdump_command)
+        await run_on_cluster_resources(args, resources, vzdump_command)
+    elif args.command == 'ha':
+        ha_resources = get_filtered_cluster_ha_resources(vmids)
+
+        async def ha_command_helper(args, resource):
+            ha_resource = ha_resources.get(str(resource["vmid"]))
+            await ha_command(args, resource, ha_resource)
+
+        await run_on_cluster_resources(args, resources, ha_command_helper)
+    elif args.command == 'ha-set':
+        ha_resources = get_filtered_cluster_ha_resources(vmids)
+
+        async def ha_set_command_helper(args, resource):
+            ha_resource = ha_resources.get(str(resource["vmid"]))
+            await ha_set_command(args, resource, ha_resource)
+
+        await run_on_cluster_resources(args, resources, ha_set_command_helper)
+    elif args.command == 'ha-remove':
+        if not args.ids:
+            print(f"An ID is required when removing an HA configuration")
+            return
+
+        ha_resources = get_filtered_cluster_ha_resources(vmids)
+
+        async def ha_remove_command_helper(args, resource):
+            ha_resource = ha_resources.get(str(resource["vmid"]))
+            await ha_remove_command(args, resource, ha_resource)
+
+        await run_on_cluster_resources(args, resources, ha_remove_command_helper)
     else:
         print(f"Command missing implementation: {args.command}")
 
@@ -525,6 +728,8 @@ async def main():
                         help='On snapshot, saves a description.', default=False)
     parser.add_argument('--force', action='store_true',
                         help='On delsnapshot, For removal from config file, even if removing disk snapshots fails.', default=False)
+    parser.add_argument('--ha-state', nargs="?", choices=['started', 'stopped', 'enabled', 'disabled', 'ignored'],
+                        help='For ha command. Requested resource state. The CRM reads this state and acts accordingly. Please note that `enabled` is just an alias for `started`.', default="started")
     parser.add_argument(
         'command',
         nargs='?',
@@ -543,6 +748,9 @@ async def main():
             'vzdump',
             'replications',
             'replication-schedule-now',
+            'ha',
+            'ha-set',
+            'ha-remove',
         ],
         default="status",
         help='Action to perform.'
