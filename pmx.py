@@ -9,29 +9,35 @@ import time
 import math
 
 
-def run_pvesh_command(pvesh_command, api_path, options=[]):
+async def run_pvesh_command(pvesh_command, api_path, options=[]):
     """Run pvesh command and return JSON output."""
     try:
-        result = subprocess.run(
-            ['pvesh', pvesh_command] + api_path.split() + options +
-            ['--output-format', 'json'],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+        process = await asyncio.create_subprocess_exec(
+            'pvesh', pvesh_command, *api_path.split(), *options, '--output-format', 'json',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
+
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            print(
+                f"Error executing pvesh command on {api_path}: {stderr.decode()}", file=sys.stderr)
+            return {}
+
+        result = stdout.decode().strip()
         if result == "" or result == None:
             # happens on ha changes
             return {}
         if pvesh_command != "delete":
-            return json.loads(result.stdout)
+            return json.loads(result)
         return {}
     except subprocess.CalledProcessError as e:
         print(
             f"Error executing pvesh command on {api_path}: {e.stderr}", file=sys.stderr)
 
 
-def get_filtered_cluster_resources(args):
+async def get_filtered_cluster_resources(args):
     """
     Fetch resources from Proxmox.
 
@@ -61,7 +67,7 @@ def get_filtered_cluster_resources(args):
         for node in args.ids:
             nodes[node] = False
 
-        cluster_resources = run_pvesh_command('get', '/cluster/resources')
+        cluster_resources = await run_pvesh_command('get', '/cluster/resources')
         for resource in cluster_resources:
             if 'node' in resource and resource['node'] in nodes and resource['type'] in ['lxc', 'qemu']:
                 nodes[resource['node']] = True
@@ -83,7 +89,7 @@ def get_filtered_cluster_resources(args):
         for vmid in args.ids:
             vmids[vmid] = False
 
-        cluster_resources = run_pvesh_command('get', '/cluster/resources')
+        cluster_resources = await run_pvesh_command('get', '/cluster/resources')
         for resource in cluster_resources:
             if resource['type'] in ['lxc', 'qemu'] and str(resource['vmid']) in vmids:
                 vmid = str(resource['vmid'])
@@ -105,7 +111,7 @@ def get_filtered_cluster_resources(args):
     elif args.command == "status" or \
             args.command == 'ha' or \
             args.command == 'listsnapshot':
-        cluster_resources = run_pvesh_command('get', '/cluster/resources')
+        cluster_resources = await run_pvesh_command('get', '/cluster/resources')
         for resource in cluster_resources:
             if resource['type'] in ['lxc', 'qemu']:
                 vmid = str(resource['vmid'])
@@ -115,12 +121,16 @@ def get_filtered_cluster_resources(args):
     return resources, vmids
 
 
-def get_filtered_nodes_replication(nodes):
+async def get_filtered_nodes_replication(nodes):
     guesttoreplicas = {}
 
+    tasks = []
     for node in nodes:
         api_path = f"/nodes/{node}/replication/"
-        configs = run_pvesh_command('get', api_path)
+        tasks.append(run_pvesh_command('get', api_path))
+
+    node_configs = await asyncio.gather(*tasks)
+    for configs in node_configs:
         for config in configs:
             vmid = config['guest']
             replicas = guesttoreplicas.get(vmid)
@@ -141,7 +151,7 @@ def get_filtered_nodes_replication(nodes):
     return replications
 
 
-def get_filtered_high_fidelity_cluster_replications(args):
+async def get_filtered_high_fidelity_cluster_replications(args):
     """
     Used only for retrieving replication information.
 
@@ -173,7 +183,7 @@ def get_filtered_high_fidelity_cluster_replications(args):
         for node in args.ids:
             nodes[node] = False
 
-        pvesh_nodes = run_pvesh_command('get', '/nodes')
+        pvesh_nodes = await run_pvesh_command('get', '/nodes')
         pvesh_nodes = [node["node"] for node in pvesh_nodes]
         for pvesh_node in pvesh_nodes:
             if pvesh_node in nodes:
@@ -192,18 +202,18 @@ def get_filtered_high_fidelity_cluster_replications(args):
             for idx, node in enumerate(missing):
                 print(f'{idx + 1}. {node}')
 
-        return get_filtered_nodes_replication(exists)
+        return await get_filtered_nodes_replication(exists)
     elif args.command == 'replications' and not args.ids:
-        pvesh_nodes = run_pvesh_command('get', '/nodes')
+        pvesh_nodes = await run_pvesh_command('get', '/nodes')
         pvesh_nodes = [node["node"] for node in pvesh_nodes]
-        return get_filtered_nodes_replication(pvesh_nodes)
+        return await get_filtered_nodes_replication(pvesh_nodes)
     elif args.ids:
         vmids = {}
         for vmid in args.ids:
             vmids[vmid] = False
 
         nodesset = {}
-        lfreplicas = get_filtered_low_fidelity_cluster_replications(args)
+        lfreplicas = await get_filtered_low_fidelity_cluster_replications(args)
         for replica in lfreplicas:
             vmid = str(replica['guest'])
             if vmid in vmids:
@@ -222,14 +232,14 @@ def get_filtered_high_fidelity_cluster_replications(args):
 
         hfreplicas = []
         if vmids:
-            hfreplicas = get_filtered_nodes_replication(nodesset.keys())
+            hfreplicas = await get_filtered_nodes_replication(nodesset.keys())
             hfreplicas = [replica for replica in hfreplicas if str(
                 replica['guest']) in vmids]
 
         return hfreplicas
 
 
-def get_filtered_low_fidelity_cluster_replications(args):
+async def get_filtered_low_fidelity_cluster_replications(args):
     replications = []
 
     if args.node:
@@ -241,7 +251,7 @@ def get_filtered_low_fidelity_cluster_replications(args):
         for node in args.ids:
             nodes[node] = False
 
-        json_replications = run_pvesh_command('get', '/cluster/replication')
+        json_replications = await run_pvesh_command('get', '/cluster/replication')
         for replication in json_replications:
             if replication['source'] in nodes:
                 nodes[replication['node']] = True
@@ -261,7 +271,7 @@ def get_filtered_low_fidelity_cluster_replications(args):
         for vmid in args.ids:
             vmids[vmid] = False
 
-        json_replications = run_pvesh_command('get', '/cluster/replication')
+        json_replications = await run_pvesh_command('get', '/cluster/replication')
         for replication in json_replications:
             vmid = str(replication['guest'])
             if vmid in vmids:
@@ -281,9 +291,9 @@ def get_filtered_low_fidelity_cluster_replications(args):
     return replications
 
 
-def get_filtered_cluster_ha_resources(vmids):
+async def get_filtered_cluster_ha_resources(vmids):
     ha_resources = {}
-    output = run_pvesh_command('get', '/cluster/ha/resources')
+    output = await run_pvesh_command('get', '/cluster/ha/resources')
     for resource in output:
         if not resource["type"] == "ct":
             continue
@@ -369,7 +379,7 @@ async def perform_command(args, resource):
     try:
         print(
             f"{action.capitalize()} command sent for {resource['type']}/{vmid}.")
-        run_pvesh_command('create', api_path)
+        await run_pvesh_command('create', api_path)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh command: {e.stderr}", file=sys.stderr)
 
@@ -392,7 +402,7 @@ async def destroy_command(args, resource):
         if destroy_unreferenced_disks:
             options.append("--destroy-unreferenced-disks")
         print(f"Destroying {resource['type']}/{vmid}.")
-        run_pvesh_command('delete', api_path, options)
+        await run_pvesh_command('delete', api_path, options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -410,7 +420,7 @@ async def snapshot_command(args, resource):
             options.append("--description")
             options.append(args.description)
         print(f"Snapshotting {resource['type']}/{vmid}.")
-        run_pvesh_command('create', api_path, options)
+        await run_pvesh_command('create', api_path, options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -428,7 +438,7 @@ async def delsnapshot_command(args, resource):
             options.append("--force")
             options.append("true")
         print(f"Delete Snapshot {resource['type']}/{vmid}.")
-        run_pvesh_command('delete', api_path, options)
+        await run_pvesh_command('delete', api_path, options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -442,7 +452,7 @@ async def listsnapshot_command(args, resource):
     try:
         api_path = f"/nodes/{resource['node']}/{resource['type']}/{vmid}/snapshot"
         # print(f"List Snapshot {resource['type']}/{vmid}.")
-        snapshots = run_pvesh_command('ls', api_path)
+        snapshots = await run_pvesh_command('ls', api_path)
         for snapshot in snapshots:
             print(f"{resource['id']}: {snapshot['name']}")
     except subprocess.CalledProcessError as e:
@@ -459,7 +469,7 @@ async def vzdump_command(args, resource):
         api_path = f"/nodes/{resource['node']}/vzdump"
         options = ["--vmid", str(vmid), "--compress", "zstd"]
         print(f"Vzdump {resource['id']}")
-        run_pvesh_command('create', api_path, options)
+        await run_pvesh_command('create', api_path, options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -495,7 +505,7 @@ async def ha_set_command(args, resource, ha_resource):
             options = ["--state", args.ha_state]
             print(
                 f"Creating ha {resource['type']}/{vmid} state: {args.ha_state}")
-            run_pvesh_command('set', api_path, options)
+            await run_pvesh_command('set', api_path, options)
         else:
             sid = f'ct:{vmid}'
             if resource['type'] == 'qemu':
@@ -504,7 +514,7 @@ async def ha_set_command(args, resource, ha_resource):
                        resource['name'], "--state", args.ha_state]
             print(
                 f"Creating ha {resource['type']}/{vmid} state: {args.ha_state}")
-            run_pvesh_command('create', "/cluster/ha/resources", options)
+            await run_pvesh_command('create', "/cluster/ha/resources", options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -523,7 +533,7 @@ async def ha_remove_command(args, resource, ha_resource):
         sid = ha_resource["sid"]
         api_path = f"/cluster/ha/resources/{sid}"
         print(f"Remove HA {resource['type']}/{vmid}")
-        run_pvesh_command('delete', api_path)
+        await run_pvesh_command('delete', api_path)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
@@ -619,24 +629,24 @@ async def replication_schedule_now(args, replication):
         api_path = f"/nodes/{replication['source']}/replication/{replication['id']}/schedule_now"
         print(
             f"Replication {replication['guest']} {replication['source']} -> {replication['target']}")
-        run_pvesh_command('create', api_path)
+        await run_pvesh_command('create', api_path)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
 
 
 async def main_replications(args):
     if args.command == 'replications':
-        replications = get_filtered_high_fidelity_cluster_replications(args)
+        replications = await get_filtered_high_fidelity_cluster_replications(args)
         replications_command(args, replications)
     elif args.command == 'replication-schedule-now':
-        replications = get_filtered_high_fidelity_cluster_replications(args)
+        replications = await get_filtered_high_fidelity_cluster_replications(args)
         await run_on_ha_resources(args, replications, replication_schedule_now)
     else:
         print(f"Command missing implementation: {args.command}")
 
 
 async def main_vms(args):
-    (resources, vmids) = get_filtered_cluster_resources(args)
+    (resources, vmids) = await get_filtered_cluster_resources(args)
 
     if not resources:
         print("No resources found")
@@ -680,7 +690,7 @@ async def main_vms(args):
     elif args.command == 'vzdump':
         await run_on_cluster_resources(args, resources, vzdump_command)
     elif args.command == 'ha':
-        ha_resources = get_filtered_cluster_ha_resources(vmids)
+        ha_resources = await get_filtered_cluster_ha_resources(vmids)
 
         async def ha_command_helper(args, resource):
             ha_resource = ha_resources.get(str(resource["vmid"]))
@@ -688,7 +698,7 @@ async def main_vms(args):
 
         await run_on_cluster_resources(args, resources, ha_command_helper)
     elif args.command == 'ha-set':
-        ha_resources = get_filtered_cluster_ha_resources(vmids)
+        ha_resources = await get_filtered_cluster_ha_resources(vmids)
 
         async def ha_set_command_helper(args, resource):
             ha_resource = ha_resources.get(str(resource["vmid"]))
@@ -700,7 +710,7 @@ async def main_vms(args):
             print(f"An ID is required when removing an HA configuration")
             return
 
-        ha_resources = get_filtered_cluster_ha_resources(vmids)
+        ha_resources = await get_filtered_cluster_ha_resources(vmids)
 
         async def ha_remove_command_helper(args, resource):
             ha_resource = ha_resources.get(str(resource["vmid"]))
