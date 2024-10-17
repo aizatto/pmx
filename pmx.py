@@ -291,13 +291,30 @@ async def get_filtered_low_fidelity_cluster_replications(args):
     return replications
 
 
-async def get_filtered_cluster_ha_resources(vmids):
+async def get_cluster_ha_resources():
+    """
+    Docs https://pve.proxmox.com/pve-docs/api-viewer/#/cluster/ha/resources
+    """
     ha_resources = {}
     output = await run_pvesh_command('get', '/cluster/ha/resources')
     for resource in output:
-        if not resource["type"] == "ct":
+        sid = resource.get("sid")
+        if sid is None:
             continue
 
+        vmid = sid[3:]
+        ha_resources[vmid] = resource
+
+    return ha_resources
+
+
+async def get_filtered_cluster_ha_resources(vmids):
+    """
+    Docs https://pve.proxmox.com/pve-docs/api-viewer/#/cluster/ha/resources
+    """
+    ha_resources = {}
+    output = await run_pvesh_command('get', '/cluster/ha/resources')
+    for resource in output:
         sid = resource.get("sid")
         if sid is None:
             continue
@@ -487,6 +504,9 @@ async def ha_command(args, resource, ha_resource):
 
 
 async def ha_set_command(args, resource, ha_resource):
+    """
+    Docs https://pve.proxmox.com/pve-docs/api-viewer/#/cluster/ha/resources/{sid}
+    """
     vmid = resource['vmid']
     if not resource:
         print(f"Resource ID {vmid} not found.")
@@ -501,10 +521,10 @@ async def ha_set_command(args, resource, ha_resource):
 
             sid = ha_resource["sid"]
 
-            api_path = f"/cluster/ha/resources/{vmid}"
+            api_path = f"/cluster/ha/resources/{sid}"
             options = ["--state", args.ha_state]
             print(
-                f"Creating ha {resource['type']}/{vmid} state: {args.ha_state}")
+                f"Updating ha {resource['type']}/{vmid} state: {args.ha_state}")
             await run_pvesh_command('set', api_path, options)
         else:
             sid = f'ct:{vmid}'
@@ -517,6 +537,44 @@ async def ha_set_command(args, resource, ha_resource):
             await run_pvesh_command('create', "/cluster/ha/resources", options)
     except subprocess.CalledProcessError as e:
         print(f"Error executing pvesh api_path: {e.stderr}", file=sys.stderr)
+
+
+async def ha_set_started_all_command(args, resource, ha_resource):
+    vmid = resource['vmid']
+    if not resource or not ha_resource:
+        return
+
+    if "started" == ha_resource.get("state"):
+        print(
+            f"{resource['type']}/{vmid} state is already {ha_resource['state']}")
+        return
+
+    sid = ha_resource["sid"]
+
+    api_path = f"/cluster/ha/resources/{sid}"
+    options = ["--state", "started"]
+    print(
+        f"Updating ha {resource['type']}/{vmid} state: {args.ha_state}")
+    await run_pvesh_command('set', api_path, options)
+
+
+async def ha_set_ignored_all_command(args, resource, ha_resource):
+    vmid = resource['vmid']
+    if not resource or not ha_resource:
+        return
+
+    if "ignored" == ha_resource.get("state"):
+        print(
+            f"{resource['type']}/{vmid} state is already {ha_resource['state']}")
+        return
+
+    sid = ha_resource["sid"]
+
+    api_path = f"/cluster/ha/resources/{sid}"
+    options = ["--state", "ignored"]
+    print(
+        f"Updating ha {resource['type']}/{vmid} state: {args.ha_state}")
+    await run_pvesh_command('set', api_path, options)
 
 
 async def ha_remove_command(args, resource, ha_resource):
@@ -645,6 +703,30 @@ async def main_replications(args):
         print(f"Command missing implementation: {args.command}")
 
 
+async def main_ha(args):
+    ha_resources = await get_cluster_ha_resources()
+    vmids = ha_resources.keys()
+
+    args2 = argparse.Namespace()
+    args2.ids = vmids
+    args2.node = None
+    args2.command = None
+    (resources, _) = await get_filtered_cluster_resources(args2)
+
+    if args.command == 'ha-set-started-all':
+        async def ha_set_started_all_command_helper(args, resource):
+            ha_resource = ha_resources.get(str(resource["vmid"]))
+            await ha_set_started_all_command(args, resource, ha_resource)
+
+        await run_on_cluster_resources(args, resources, ha_set_started_all_command_helper)
+    elif args.command == 'ha-set-ignored-all':
+        async def ha_set_ignored_all_command_helper(args, resource):
+            ha_resource = ha_resources.get(str(resource["vmid"]))
+            await ha_set_ignored_all_command(args, resource, ha_resource)
+
+        await run_on_cluster_resources(args, resources, ha_set_ignored_all_command_helper)
+
+
 async def main_vms(args):
     (resources, vmids) = await get_filtered_cluster_resources(args)
 
@@ -740,7 +822,7 @@ async def main():
                         help='On snapshot, saves a description.', default=False)
     parser.add_argument('--force', action='store_true',
                         help='On delsnapshot, For removal from config file, even if removing disk snapshots fails.', default=False)
-    parser.add_argument('--ha-state', nargs="?", choices=['started', 'stopped', 'enabled', 'disabled', 'ignored'],
+    parser.add_argument('--ha-state', nargs="?", choices=['started', 'stopped', 'disabled', 'ignored'],
                         help='For ha command. Requested resource state. The CRM reads this state and acts accordingly. Please note that `enabled` is just an alias for `started`.', default="started")
     parser.add_argument(
         'command',
@@ -762,6 +844,8 @@ async def main():
             'replication-schedule-now',
             'ha',
             'ha-set',
+            'ha-set-started-all',
+            'ha-set-ignored-all',
             'ha-remove',
         ],
         default="status",
@@ -773,6 +857,9 @@ async def main():
     if args.command == "replication-schedule-now" or \
             args.command == "replications":
         await main_replications(args)
+    elif args.command == "ha-set-started-all" or \
+            args.command == "ha-set-ignored-all":
+        await main_ha(args)
     else:
         await main_vms(args)
 

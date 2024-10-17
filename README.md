@@ -52,8 +52,9 @@ Available commands:
 1. `replication-schedule-now`
 1. `vzdump`
 1. `ha`
-1. `ha-delete`
-1. `ha-upsert`
+1. `ha-set`
+1. `ha-set-started-all`
+1. `ha-set-ignored-all`
 
 ### **Get the status** of all your containers
 ```bash
@@ -166,9 +167,8 @@ Arguments:
 State can be one of:
 1. `started`: The CRM tries to start the resource. Service state is set to `started` after successful start. On node failures, or when start fails, it tries to recover the resource.  If everything fails, service state it set to `error`.
 2. `stopped`: The CRM tries to keep the resource in `stopped` state, but it still tries to relocate the resources on node failures.
-3. `enabled`: Alias for `started`
-4. `disabled`: The CRM tries to put the resource in `stopped` state, but does not try to relocate the resources on node failures. The main purpose of this state is error recovery, because it is the only way to move a resource out of the `error` state.
-5. `ignored`: The resource gets removed from the manager status and so the CRM and the LRM do not touch the resource anymore. All {pve} API calls affecting this resource will be executed, directly bypassing the HA stack. CRM commands will be thrown away while there source is in this state. The resource will not get relocated on node failures.
+3. `disabled`: The CRM tries to put the resource in `stopped` state, but does not try to relocate the resources on node failures. The main purpose of this state is error recovery, because it is the only way to move a resource out of the `error` state.
+4. `ignored`: The resource gets removed from the manager status and so the CRM and the LRM do not touch the resource anymore. All {pve} API calls affecting this resource will be executed, directly bypassing the HA stack. CRM commands will be thrown away while there source is in this state. The resource will not get relocated on node failures.
 
 
 ```bash
@@ -177,6 +177,19 @@ State can be one of:
 ```
 
 ### Remove HA
+
+```bash
+./pmx.py ha-delete 100
+```
+
+### Start all, or ignore all AH
+
+Useful when turning off all your proxmox nodes.
+
+```bash
+./pmx.py ha-set-started-all
+./pmx.py ha-set-ignored-all
+```
 
 ```bash
 ./pmx.py ha-delete 100
